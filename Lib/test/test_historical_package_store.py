@@ -57,6 +57,18 @@ class HistoricalPackageStoreTests(unittest.TestCase):
             file.write(f'VERSION = {value!r}\n')
         return ambient
 
+    def write_ambient_distribution(self, version, value=None):
+        ambient = self.write_ambient(value or version)
+        metadata = os.path.join(ambient, f'testpkg-{version}.dist-info')
+        os.makedirs(metadata)
+        with open(os.path.join(metadata, 'METADATA'),
+                  'w', encoding='utf-8') as file:
+            file.write(
+                'Metadata-Version: 2.1\n'
+                'Name: testpkg\n'
+                f'Version: {version}\n')
+        return ambient
+
     def run_main(self, *, ambient=None, expect_success=True):
         env = {'HOME': self.home, '__isolated': False}
         if sys.platform == 'win32':
@@ -130,6 +142,25 @@ class HistoricalPackageStoreTests(unittest.TestCase):
         self.write_store('1.0', 'from historical store')
         self.write_project('testpkg==1.0')
         ambient = self.write_ambient('from sys.path')
+
+        _, stdout, _ = self.run_main(ambient=ambient)
+
+        self.assertEqual(stdout, b'from historical store\n')
+
+    def test_compatible_ordinary_distribution_precedes_store(self):
+        self.write_store('2.4', 'from historical store')
+        self.write_project('testpkg>=2.0,<3.0')
+        ambient = self.write_ambient_distribution(
+            '2.5', 'from ordinary distribution')
+
+        _, stdout, _ = self.run_main(ambient=ambient)
+
+        self.assertEqual(stdout, b'from ordinary distribution\n')
+
+    def test_incompatible_ordinary_distribution_uses_store(self):
+        self.write_store('2.4', 'from historical store')
+        self.write_project('testpkg>=2.0,<3.0')
+        ambient = self.write_ambient_distribution('3.0')
 
         _, stdout, _ = self.run_main(ambient=ambient)
 

@@ -327,6 +327,15 @@ def _requirement_for_import(import_name, requirements, store):
         if (distribution_path is not None and
                 _provides_import(distribution_path, import_name)):
             return requirement
+    try:
+        from importlib.metadata import packages_distributions
+        providers = packages_distributions().get(import_name, ())
+    except (ImportError, OSError):
+        providers = ()
+    for distribution in providers:
+        requirement = requirements.get(_normalize_name(distribution))
+        if requirement is not None:
+            return requirement
     return None
 
 
@@ -355,6 +364,15 @@ def _select_version(requirement, import_name, store):
         return None
 
 
+def _ordinary_version(requirement):
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        installed = version(requirement['name'])
+    except (ImportError, OSError, PackageNotFoundError):
+        return None
+    return installed if _matches(installed, requirement) else None
+
+
 def _encoded_name(import_name, distribution, version, suffix):
     distribution_hex = distribution.encode('utf-8').hex()
     version_hex = version.encode('utf-8').hex()
@@ -373,6 +391,8 @@ def resolve(name, script=None, explicit_project=None):
     store = _store_root()
     requirement = _requirement_for_import(import_name, requirements, store)
     if requirement is None:
+        return name
+    if _ordinary_version(requirement) is not None:
         return name
     version = _select_version(requirement, import_name, store)
     if version is None:
