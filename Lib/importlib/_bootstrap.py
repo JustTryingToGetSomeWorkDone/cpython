@@ -1254,6 +1254,48 @@ def _sanity_check(name, package, level):
 
 _ERR_MSG_PREFIX = 'No module named '
 
+
+def _split_historical_name(name):
+    """Decode the internal name used for a metadata-selected package."""
+    head = name.partition('.')[0]
+    import_name, at, selection = head.partition('@')
+    distribution_hex, colon, version_hex = selection.partition(':')
+    if (not at or not colon or not import_name.isidentifier() or
+            not distribution_hex or not version_hex):
+        return None
+    try:
+        distribution = bytes.fromhex(distribution_hex).decode('utf-8')
+        version = bytes.fromhex(version_hex).decode('utf-8')
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if (not distribution or not version or
+            distribution in {'.', '..'} or version in {'.', '..'} or
+            any(separator in distribution or separator in version
+                for separator in ('/', '\\'))):
+        return None
+    return import_name, distribution, version
+
+
+_historical_import_active = False
+
+
+def _resolve_historical_name(name):
+    """Apply project metadata to an absolute import when appropriate."""
+    global _historical_import_active
+    if (not isinstance(name, str) or _historical_import_active or
+            _bootstrap_external is None):
+        return name
+    main = sys.modules.get('__main__')
+    script = getattr(main, '__file__', None)
+    if not isinstance(script, str) or script.startswith('<'):
+        return name
+    _historical_import_active = True
+    try:
+        resolver = _gcd_import('_historical_store')
+        return resolver.resolve(name, script)
+    finally:
+        _historical_import_active = False
+
 def _find_and_load_unlocked(name, import_, *, lazy_submodule=False):
     path = None
     sys.audit(
@@ -1289,10 +1331,20 @@ def _find_and_load_unlocked(name, import_, *, lazy_submodule=False):
         if module is not None:
             return module
         child = name.rpartition('.')[2]
-    spec = _find_spec(name, path)
+    historical_name = _split_historical_name(name)
+    if historical_name is not None and not parent:
+        import_name, distribution, version = historical_name
+        spec = _bootstrap_external._find_historical_spec(
+            name, import_name, distribution, version)
+    else:
+        spec = _find_spec(name, path)
     if spec is None:
         if lazy_submodule:
             return None
+        if historical_name is not None and not parent:
+            raise ModuleNotFoundError(
+                f'{distribution} version {version} is not available in the '
+                'historical package store', name=name)
         raise ModuleNotFoundError(f'{_ERR_MSG_PREFIX}{name!r}', name=name)
     else:
         if parent_spec:
@@ -1381,6 +1433,8 @@ def _gcd_import(name, package=None, level=0):
     _sanity_check(name, package, level)
     if level > 0:
         name = _resolve_name(name, package, level)
+    else:
+        name = _resolve_historical_name(name)
     return _find_and_load(name, _gcd_import)
 
 

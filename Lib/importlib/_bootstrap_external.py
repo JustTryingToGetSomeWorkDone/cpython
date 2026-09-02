@@ -615,6 +615,29 @@ def spec_from_file_location(name, location=None, *, loader=None,
     return spec
 
 
+def _find_historical_spec(fullname, import_name, distribution, version):
+    """Find a pure-Python package in the per-user historical store."""
+    if _MS_WINDOWS:
+        home = (_os.environ.get('USERPROFILE') or
+                _os.environ.get('HOME'))
+    else:
+        home = _os.environ.get(b'HOME')
+        if home is not None:
+            home = home.decode(sys.getfilesystemencoding(), 'surrogateescape')
+    if not home:
+        return None
+
+    package_path = _path_join(
+        home, '.python', 'packages', distribution, version, import_name)
+    init_path = _path_join(package_path, '__init__.py')
+    if not _path_isfile(init_path):
+        return None
+    loader = SourceFileLoader(fullname, init_path)
+    return spec_from_file_location(
+        fullname, init_path, loader=loader,
+        submodule_search_locations=[package_path])
+
+
 def _bless_my_loader(module_globals):
     """Helper function for _warnings.c
 

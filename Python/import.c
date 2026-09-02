@@ -4171,7 +4171,8 @@ get_abs_name(PyThreadState *tstate, PyObject *name, PyObject *globals,
         _PyErr_SetString(tstate, PyExc_ValueError, "Empty module name");
         return NULL;
     }
-    return Py_NewRef(name);
+    return PyObject_CallMethod(IMPORTLIB(tstate->interp),
+                               "_resolve_historical_name", "O", name);
 }
 
 PyObject *
