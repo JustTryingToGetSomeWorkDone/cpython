@@ -917,6 +917,64 @@ def _bless_my_loader(module_globals):
     return spec_loader
 
 
+def _get_historical_project():
+    """Return the project root explicitly selected for an embedded host."""
+    if _MS_WINDOWS:
+        project = _os.environ.get('PYTHONHISTORICALPROJECT')
+    else:
+        project = _os.environ.get(b'PYTHONHISTORICALPROJECT')
+        if project is not None:
+            project = project.decode(
+                sys.getfilesystemencoding(), 'surrogateescape')
+    return project or None
+
+
+def _has_historical_project(script, explicit_project):
+    """Check for project metadata without importing the resolver."""
+    if explicit_project:
+        directory, filename = _path_split(explicit_project)
+        if filename not in {'pylock.toml', 'pyproject.toml'}:
+            directory = explicit_project
+        return (_path_isfile(_path_join(directory, 'pylock.toml')) or
+                _path_isfile(_path_join(directory, 'pyproject.toml')))
+    if not script:
+        return False
+    if not _path_isabs(script):
+        script = _path_join(_os.getcwd(), script)
+    directory = _path_split(script)[0]
+    while True:
+        if (_path_isfile(_path_join(directory, 'pylock.toml')) or
+                _path_isfile(_path_join(directory, 'pyproject.toml'))):
+            return True
+        parent = _path_split(directory)[0]
+        if parent == directory:
+            return False
+        directory = parent
+
+
+def _find_historical_spec(fullname, import_name, distribution, version):
+    """Find a pure-Python package in the per-user historical store."""
+    if _MS_WINDOWS:
+        home = (_os.environ.get('USERPROFILE') or
+                _os.environ.get('HOME'))
+    else:
+        home = _os.environ.get(b'HOME')
+        if home is not None:
+            home = home.decode(sys.getfilesystemencoding(), 'surrogateescape')
+    if not home:
+        return None
+
+    package_path = _path_join(
+        home, '.python', 'packages', distribution, version, import_name)
+    init_path = _path_join(package_path, '__init__.py')
+    if not _path_isfile(init_path):
+        return None
+    loader = SourceFileLoader(fullname, init_path)
+    return spec_from_file_location(
+        fullname, init_path, loader=loader,
+        submodule_search_locations=[package_path])
+
+
 # Loaders #####################################################################
 
 class WindowsRegistryFinder:
