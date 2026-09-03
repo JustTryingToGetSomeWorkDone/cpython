@@ -953,7 +953,7 @@ def _has_historical_project(script, explicit_project):
 
 
 def _find_historical_spec(fullname, import_name, distribution, version):
-    """Find a pure-Python package in the per-user historical store."""
+    """Find a pure-Python module or package in the historical store."""
     if _MS_WINDOWS:
         home = (_os.environ.get('USERPROFILE') or
                 _os.environ.get('HOME'))
@@ -964,15 +964,21 @@ def _find_historical_spec(fullname, import_name, distribution, version):
     if not home:
         return None
 
-    package_path = _path_join(
-        home, '.python', 'packages', distribution, version, import_name)
+    version_path = _path_join(
+        home, '.python', 'packages', distribution, version)
+    package_path = _path_join(version_path, import_name)
     init_path = _path_join(package_path, '__init__.py')
-    if not _path_isfile(init_path):
-        return None
-    loader = SourceFileLoader(fullname, init_path)
-    return spec_from_file_location(
-        fullname, init_path, loader=loader,
-        submodule_search_locations=[package_path])
+    if _path_isfile(init_path):
+        loader = SourceFileLoader(fullname, init_path)
+        return spec_from_file_location(
+            fullname, init_path, loader=loader,
+            submodule_search_locations=[package_path])
+
+    module_path = _path_join(version_path, import_name + '.py')
+    if _path_isfile(module_path):
+        loader = SourceFileLoader(fullname, module_path)
+        return spec_from_file_location(fullname, module_path, loader=loader)
+    return None
 
 
 # Loaders #####################################################################

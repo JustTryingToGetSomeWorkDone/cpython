@@ -309,8 +309,10 @@ def _provides_import(distribution_path, import_name):
     with versions:
         return any(
             entry.is_dir() and
-            os.path.isfile(os.path.join(
-                entry.path, import_name, '__init__.py'))
+            (os.path.isfile(os.path.join(
+                entry.path, import_name, '__init__.py')) or
+             os.path.isfile(os.path.join(
+                 entry.path, import_name + '.py')))
             for entry in versions)
 
 
@@ -351,8 +353,10 @@ def _select_version(requirement, import_name, store):
     with entries:
         for entry in entries:
             if (entry.is_dir() and
-                    os.path.isfile(os.path.join(
-                        entry.path, import_name, '__init__.py')) and
+                    (os.path.isfile(os.path.join(
+                        entry.path, import_name, '__init__.py')) or
+                     os.path.isfile(os.path.join(
+                         entry.path, import_name + '.py'))) and
                     _matches(entry.name, requirement)):
                 versions.append(entry.name)
     exact = requirement['exact']
