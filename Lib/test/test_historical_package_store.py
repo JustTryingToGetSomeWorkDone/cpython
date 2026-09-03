@@ -48,6 +48,15 @@ class HistoricalPackageStoreTests(unittest.TestCase):
                   'w', encoding='utf-8') as file:
             file.write(f'VERSION = {(value or version)!r}\n')
 
+    def write_store_module(self, version, value=None, *,
+                           distribution='testpkg', import_name='testpkg'):
+        directory = os.path.join(
+            self.home, '.python', 'packages', distribution, version)
+        os.makedirs(directory)
+        with open(os.path.join(directory, import_name + '.py'),
+                  'w', encoding='utf-8') as file:
+            file.write(f'VERSION = {(value or version)!r}\n')
+
     def write_ambient(self, value):
         ambient = self.enterContext(os_helper.temp_dir())
         package = os.path.join(ambient, 'testpkg')
@@ -192,6 +201,16 @@ class HistoricalPackageStoreTests(unittest.TestCase):
         _, stdout, _ = self.run_main()
 
         self.assertEqual(stdout, b'10.0\n')
+
+    def test_single_file_module(self):
+        self.write_main('singlemod')
+        self.write_project('single-dist==1.0')
+        self.write_store_module(
+            '1.0', distribution='single-dist', import_name='singlemod')
+
+        _, stdout, _ = self.run_main()
+
+        self.assertEqual(stdout, b'1.0\n')
 
     def test_explicit_project_supports_embedded_import(self):
         self.write_project('testpkg==1.0')
