@@ -14,6 +14,135 @@ This is Python version 3.16.0 alpha 0
    :target: https://discuss.python.org/
 
 
+Historical package store prototype
+----------------------------------
+
+.. warning::
+
+   This branch is an experimental proof of concept based on CPython 3.16.0a0.
+   It is not an official Python feature or a production package-management
+   system.
+
+This branch prototypes deterministic, metadata-driven imports from a permanent
+package store. Package releases coexist under paths of the following form::
+
+    ~/.python/packages/<distribution>/<version>/
+
+Projects continue to use normal Python syntax, for example
+``import requests``. The interpreter discovers the project's dependency
+metadata and selects a compatible distribution release; no version syntax is
+added to Python source code.
+
+Motivation
+^^^^^^^^^^
+
+A conventional installation places one selected release of a distribution in
+an environment. Updating that release can invalidate an older application,
+while maintaining a separate environment for every application duplicates
+packages and moves dependency selection outside the program's metadata.
+
+This prototype explores an additive alternative: retain historical releases
+side-by-side, let each project state what it requires, and select a stored
+release without replacing versions needed by other projects. Existing imports
+remain unchanged when no project metadata is present.
+
+Selection model
+^^^^^^^^^^^^^^^
+
+For each absolute import, the prototype:
+
+1. Finds project metadata by walking upward from the main script until it sees
+   ``pylock.toml`` or ``pyproject.toml``. Embedded hosts and ``python -c`` can
+   instead set ``PYTHONHISTORICALPROJECT`` to a project directory or directly
+   to either metadata file.
+2. Uses a compatible ``pylock.toml`` with ``lock-version = "1.0"`` when one is
+   present. Otherwise, it reads ``[project].dependencies`` from
+   ``pyproject.toml``.
+3. Leaves normal import resolution in place when the ordinarily installed
+   distribution satisfies the requirement.
+4. Otherwise selects the exact requested release, or the highest compatible
+   release, from ``~/.python/packages/<distribution>/<version>/``.
+5. Loads either ``<import-name>/__init__.py`` or a single-file
+   ``<import-name>.py`` while preserving the module's ordinary public name.
+
+Distribution names and import names may differ. For example, metadata can name
+``Pillow`` while the application imports ``PIL``. If metadata selects a
+dependency but no compatible stored release is available, import fails with a
+version-specific ``ModuleNotFoundError`` rather than silently using an
+incompatible release.
+
+Minimal example
+^^^^^^^^^^^^^^^
+
+Given this project::
+
+    example/
+        pyproject.toml
+        app.py
+
+with ``pyproject.toml`` containing::
+
+    [project]
+    name = "historical-store-example"
+    version = "0.1"
+    dependencies = ["testpkg==1.0"]
+
+and ``app.py`` containing::
+
+    import testpkg
+    print(testpkg.VERSION)
+
+place the package at::
+
+    ~/.python/packages/testpkg/1.0/testpkg/__init__.py
+
+with the following content::
+
+    VERSION = "1.0"
+
+Running ``app.py`` with this interpreter prints ``1.0``. For an embedded host,
+select the same metadata explicitly::
+
+    PYTHONHISTORICALPROJECT=/path/to/example ./python -c \
+        'import testpkg; print(testpkg.VERSION)'
+
+The interpreter only consumes metadata and imports installed content. Package
+installation and store-management commands belong to the companion
+experimental pip implementation and are not part of this repository.
+
+Implementation and tests
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+The implementation is intentionally isolated in ``Lib/_historical_store.py``
+and small import-bootstrap hooks. Its focused regression suite covers exact and
+ranged requirements, lock-file precedence, ordinary-distribution precedence,
+missing-version errors, differing distribution/import names, single-file
+modules, embedded-project discovery, and unchanged legacy imports.
+
+From a CPython build directory, run the focused tests with::
+
+    ./python -m test test_historical_package_store
+
+A real embedded-application integration is available in the
+`FreeCAD historical-store branch
+<https://github.com/JustTryingToGetSomeWorkDone/FreeCAD/tree/historical-python-store-test>`_.
+
+Prototype boundaries
+^^^^^^^^^^^^^^^^^^^^^
+
+This branch does not download packages, resolve or install dependencies,
+replace pip, remove ``site-packages``, provide lock-file authoring, or support
+simultaneous releases of the same import name in one process. It does not solve
+native-extension ABI or shared-library compatibility. The store root and
+``PYTHONHISTORICALPROJECT`` name are prototype interfaces and may change.
+
+When PyPA's ``packaging`` library is unavailable, the bootstrap-safe fallback
+accepts only final versions made from decimal components and a limited set of
+comparison operators. The prototype has not been performance-optimized; in
+particular, project metadata is currently rediscovered and parsed during
+imports.
+
+
 Copyright © 2001 Python Software Foundation.  All rights reserved.
 
 See the end of this file for further copyright and license information.
