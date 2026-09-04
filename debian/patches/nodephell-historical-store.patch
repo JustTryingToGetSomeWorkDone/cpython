@@ -1,0 +1,1054 @@
+Description: add metadata-driven historical package imports
+ Resolve declared project dependencies from a permanent, versioned user store
+ while preserving ordinary imports and Ubuntu's system package behavior.
+Author: John Daniels <john.daniels@fkk-corporation.com>
+Forwarded: not-needed
+Last-Update: 2026-09-04
+
+diff --git a/Lib/_historical_store.py b/Lib/_historical_store.py
+new file mode 100644
+index 0000000..dceaa56
+--- /dev/null
++++ b/Lib/_historical_store.py
+@@ -0,0 +1,410 @@
++"""Resolve project dependencies from an experimental historical store.
++
++Project metadata is normally discovered by walking upward from the main
++script.  Embedded hosts and ``python -c`` may set ``PYTHONHISTORICALPROJECT``
++to an explicit project directory (or a metadata file inside it).  The first
++directory containing ``pylock.toml`` or ``pyproject.toml`` is the project root.
++A compatible lock file takes priority over ``[project].dependencies``.
++
++This is a deliberately small prototype.  It uses PyPA's ``packaging`` library
++when available.  Stock CPython does not include that library, so a fallback
++supports final releases made of decimal components and the comparison
++operators needed by the prototype.
++"""
++
++import os
++import re
++import sys
++import tomllib
++
++
++try:
++    from packaging.markers import Marker as _PackagingMarker
++    from packaging.requirements import Requirement as _PackagingRequirement
++    from packaging.version import InvalidVersion as _InvalidPackagingVersion
++    from packaging.version import Version as _PackagingVersion
++except ImportError:
++    _PackagingMarker = None
++    _PackagingRequirement = None
++    _InvalidPackagingVersion = ValueError
++    _PackagingVersion = None
++
++
++_NAME_PATTERN = re.compile(
++    r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)"
++    r"(?:\[[^]]+\])?\s*(.*?)\s*$")
++_SPECIFIER_PATTERN = re.compile(
++    r"^(~=|==|!=|<=|>=|<|>)\s*([0-9]+(?:\.[0-9]+)*)$")
++_VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
++
++
++def _normalize_name(name):
++    return re.sub(r"[-_.]+", "-", name).lower()
++
++
++def _discover_project(script, explicit_project=None):
++    if explicit_project:
++        directory = os.path.abspath(os.path.expanduser(explicit_project))
++        if os.path.basename(directory) in {'pylock.toml', 'pyproject.toml'}:
++            directory = os.path.dirname(directory)
++        lock_path = os.path.join(directory, 'pylock.toml')
++        project_path = os.path.join(directory, 'pyproject.toml')
++        if os.path.isfile(lock_path) or os.path.isfile(project_path):
++            return lock_path, project_path
++        return None
++    if not script or script.startswith('<'):
++        return None
++    directory = os.path.dirname(os.path.abspath(script))
++    while True:
++        lock_path = os.path.join(directory, 'pylock.toml')
++        project_path = os.path.join(directory, 'pyproject.toml')
++        if os.path.isfile(lock_path) or os.path.isfile(project_path):
++            return lock_path, project_path
++        parent = os.path.dirname(directory)
++        if parent == directory:
++            return None
++        directory = parent
++
++
++def _read_toml(path):
++    try:
++        with open(path, 'rb') as file:
++            return tomllib.load(file)
++    except (OSError, tomllib.TOMLDecodeError):
++        return None
++
++
++def _fallback_specifiers(specifier):
++    if not specifier:
++        return []
++    clauses = []
++    for text in specifier.split(','):
++        match = _SPECIFIER_PATTERN.fullmatch(text.strip())
++        if match is None:
++            return None
++        clauses.append(match.groups())
++    return clauses
++
++
++def _make_requirement(name, specifier, raw=None):
++    if _PackagingRequirement is not None:
++        try:
++            requirement = _PackagingRequirement(f'{name}{specifier}')
++        except ValueError:
++            return None
++        exact = None
++        specs = list(requirement.specifier)
++        if (len(specs) == 1 and specs[0].operator == '==' and
++                not specs[0].version.endswith('.*')):
++            exact = specs[0].version
++        return {
++            'name': requirement.name,
++            'specifier': str(requirement.specifier),
++            'parsed': requirement.specifier,
++            'exact': exact,
++            'raw': raw or f'{requirement.name}{requirement.specifier}',
++        }
++
++    clauses = _fallback_specifiers(specifier)
++    if clauses is None:
++        return None
++    exact = None
++    if len(clauses) == 1 and clauses[0][0] == '==':
++        exact = clauses[0][1]
++    return {
++        'name': name,
++        'specifier': specifier.replace(' ', ''),
++        'parsed': clauses,
++        'exact': exact,
++        'raw': raw or f'{name}{specifier}',
++    }
++
++
++def _parse_dependency(text):
++    if not isinstance(text, str):
++        return None
++    if _PackagingRequirement is not None:
++        try:
++            requirement = _PackagingRequirement(text)
++        except ValueError:
++            return None
++        if requirement.url is not None:
++            return None
++        if requirement.marker is not None and not requirement.marker.evaluate():
++            return None
++        return _make_requirement(
++            requirement.name, str(requirement.specifier), raw=text)
++
++    if ';' in text or '@' in text:
++        return None
++    match = _NAME_PATTERN.fullmatch(text)
++    if match is None:
++        return None
++    name, specifier = match.groups()
++    return _make_requirement(name, specifier, raw=text)
++
++
++def _lock_is_compatible(data):
++    if data.get('lock-version') != '1.0':
++        return False
++    requires_python = data.get('requires-python')
++    if requires_python:
++        current = '.'.join(str(value) for value in sys.version_info[:3])
++        requirement = _make_requirement('python', requires_python)
++        if requirement is None or not _matches(current, requirement):
++            return False
++    environments = data.get('environments')
++    if environments:
++        if _PackagingMarker is None:
++            return False
++        try:
++            if not any(_PackagingMarker(marker).evaluate()
++                       for marker in environments):
++                return False
++        except (TypeError, ValueError):
++            return False
++    return True
++
++
++def _lock_requirements(path):
++    data = _read_toml(path)
++    if data is None or not _lock_is_compatible(data):
++        return None
++    requirements = {}
++    for package in data.get('packages', ()):
++        if not isinstance(package, dict):
++            return None
++        marker = package.get('marker')
++        if marker:
++            if _PackagingMarker is None:
++                return None
++            try:
++                if not _PackagingMarker(marker).evaluate():
++                    continue
++            except (TypeError, ValueError):
++                return None
++        name = package.get('name')
++        version = package.get('version')
++        if not isinstance(name, str) or not isinstance(version, str):
++            continue
++        requirement = _make_requirement(
++            name, f'=={version}', raw=f'{name}=={version}')
++        if requirement is None:
++            return None
++        normalized = _normalize_name(name)
++        previous = requirements.get(normalized)
++        if previous is not None and previous['exact'] != version:
++            return None
++        requirements[normalized] = requirement
++    return requirements
++
++
++def _project_requirements(path):
++    data = _read_toml(path)
++    if data is None:
++        return {}
++    dependencies = data.get('project', {}).get('dependencies', ())
++    if not isinstance(dependencies, list):
++        return {}
++    requirements = {}
++    for text in dependencies:
++        requirement = _parse_dependency(text)
++        if requirement is not None:
++            requirements[_normalize_name(requirement['name'])] = requirement
++    return requirements
++
++
++def _requirements_for_project(script, explicit_project=None):
++    discovered = _discover_project(script, explicit_project)
++    if discovered is None:
++        return None
++    lock_path, project_path = discovered
++    if os.path.isfile(lock_path):
++        requirements = _lock_requirements(lock_path)
++        if requirements is not None:
++            return requirements
++    if os.path.isfile(project_path):
++        return _project_requirements(project_path)
++    return {}
++
++
++def _release(version):
++    if not _VERSION_PATTERN.fullmatch(version):
++        raise ValueError(f'unsupported version: {version}')
++    return tuple(int(part) for part in version.split('.'))
++
++
++def _compare(left, right):
++    size = max(len(left), len(right))
++    left += (0,) * (size - len(left))
++    right += (0,) * (size - len(right))
++    return (left > right) - (left < right)
++
++
++def _fallback_matches(version, clauses):
++    try:
++        candidate = _release(version)
++    except ValueError:
++        return False
++    for operator, required_text in clauses:
++        required = _release(required_text)
++        comparison = _compare(candidate, required)
++        if operator == '==' and comparison != 0:
++            return False
++        if operator == '!=' and comparison == 0:
++            return False
++        if operator == '<=' and comparison > 0:
++            return False
++        if operator == '>=' and comparison < 0:
++            return False
++        if operator == '<' and comparison >= 0:
++            return False
++        if operator == '>' and comparison <= 0:
++            return False
++        if operator == '~=':
++            upper = ((required[0] + 1,) if len(required) == 1 else
++                     required[:-2] + (required[-2] + 1,))
++            if comparison < 0 or _compare(candidate, upper) >= 0:
++                return False
++    return True
++
++
++def _matches(version, requirement):
++    if _PackagingVersion is not None:
++        try:
++            parsed = _PackagingVersion(version)
++        except _InvalidPackagingVersion:
++            return False
++        return requirement['parsed'].contains(parsed, prereleases=None)
++    return _fallback_matches(version, requirement['parsed'])
++
++
++def _version_key(version):
++    if _PackagingVersion is not None:
++        return _PackagingVersion(version)
++    return _release(version)
++
++
++def _store_root():
++    return os.path.join(os.path.expanduser('~'), '.python', 'packages')
++
++
++def _distribution_directory(store, distribution):
++    normalized = _normalize_name(distribution)
++    try:
++        entries = sorted(os.scandir(store), key=lambda entry: entry.name)
++    except OSError:
++        return None
++    for entry in entries:
++        if entry.is_dir() and _normalize_name(entry.name) == normalized:
++            return entry.path
++    return None
++
++
++def _provides_import(distribution_path, import_name):
++    try:
++        versions = os.scandir(distribution_path)
++    except OSError:
++        return False
++    with versions:
++        return any(
++            entry.is_dir() and
++            (os.path.isfile(os.path.join(
++                entry.path, import_name, '__init__.py')) or
++             os.path.isfile(os.path.join(
++                 entry.path, import_name + '.py')))
++            for entry in versions)
++
++
++def _requirement_for_import(import_name, requirements, store):
++    normalized_import = import_name.casefold()
++    for requirement in requirements.values():
++        default_import = _normalize_name(
++            requirement['name']).replace('-', '_')
++        if default_import == normalized_import:
++            return requirement
++    for requirement in requirements.values():
++        distribution_path = _distribution_directory(
++            store, requirement['name'])
++        if (distribution_path is not None and
++                _provides_import(distribution_path, import_name)):
++            return requirement
++    try:
++        from importlib.metadata import packages_distributions
++        providers = packages_distributions().get(import_name, ())
++    except (ImportError, OSError):
++        providers = ()
++    for distribution in providers:
++        requirement = requirements.get(_normalize_name(distribution))
++        if requirement is not None:
++            return requirement
++    return None
++
++
++def _select_version(requirement, import_name, store):
++    distribution_path = _distribution_directory(store, requirement['name'])
++    if distribution_path is None:
++        return None
++    versions = []
++    try:
++        entries = os.scandir(distribution_path)
++    except OSError:
++        return None
++    with entries:
++        for entry in entries:
++            if (entry.is_dir() and
++                    (os.path.isfile(os.path.join(
++                        entry.path, import_name, '__init__.py')) or
++                     os.path.isfile(os.path.join(
++                         entry.path, import_name + '.py'))) and
++                    _matches(entry.name, requirement)):
++                versions.append(entry.name)
++    exact = requirement['exact']
++    if exact is not None:
++        return exact if exact in versions else None
++    try:
++        return max(versions, key=_version_key)
++    except (ValueError, _InvalidPackagingVersion):
++        return None
++
++
++def _ordinary_version(requirement):
++    try:
++        from importlib.metadata import PackageNotFoundError, version
++        installed = version(requirement['name'])
++    except (ImportError, OSError, PackageNotFoundError):
++        return None
++    return installed if _matches(installed, requirement) else None
++
++
++def _encoded_name(import_name, distribution, version, suffix):
++    distribution_hex = distribution.encode('utf-8').hex()
++    version_hex = version.encode('utf-8').hex()
++    head = f'{import_name}@{distribution_hex}:{version_hex}'
++    return f'{head}.{suffix}' if suffix else head
++
++
++def resolve(name, script=None, explicit_project=None):
++    """Return an internal import name selected by project metadata."""
++    import_name, separator, suffix = name.partition('.')
++    if not import_name.isidentifier():
++        return name
++    requirements = _requirements_for_project(script, explicit_project)
++    if not requirements:
++        return name
++    store = _store_root()
++    requirement = _requirement_for_import(import_name, requirements, store)
++    if requirement is None:
++        return name
++    if _ordinary_version(requirement) is not None:
++        return name
++    version = _select_version(requirement, import_name, store)
++    if version is None:
++        specifier = requirement['specifier'] or 'any version'
++        raise ModuleNotFoundError(
++            f"{requirement['name']} requires {specifier} but no compatible "
++            "stored version is available")
++    distribution_path = _distribution_directory(store, requirement['name'])
++    distribution = os.path.basename(distribution_path)
++    return _encoded_name(import_name, distribution, version,
++                         suffix if separator else '')
+diff --git a/Lib/importlib/_bootstrap.py b/Lib/importlib/_bootstrap.py
+index d942045..e148b61 100644
+--- a/Lib/importlib/_bootstrap.py
++++ b/Lib/importlib/_bootstrap.py
+@@ -1301,6 +1301,62 @@ def _sanity_check(name, package, level):
+ _ERR_MSG_PREFIX = 'No module named '
+ _ERR_MSG = _ERR_MSG_PREFIX + '{!r}'
+ 
++
++def _split_historical_name(name):
++    """Decode the internal name used for a metadata-selected package."""
++    head = name.partition('.')[0]
++    import_name, at, selection = head.partition('@')
++    distribution_hex, colon, version_hex = selection.partition(':')
++    if (not at or not colon or not import_name.isidentifier() or
++            not distribution_hex or not version_hex):
++        return None
++    try:
++        distribution = bytes.fromhex(distribution_hex).decode('utf-8')
++        version = bytes.fromhex(version_hex).decode('utf-8')
++    except (UnicodeDecodeError, ValueError):
++        return None
++    if (not distribution or not version or
++            distribution in {'.', '..'} or version in {'.', '..'} or
++            any(separator in distribution or separator in version
++                for separator in ('/', '\\'))):
++        return None
++    return import_name, distribution, version
++
++
++_historical_import_threads = set()
++_historical_selections = {}
++
++
++def _resolve_historical_name(name):
++    """Apply project metadata to an absolute import when appropriate."""
++    thread_id = _thread.get_ident()
++    if (not isinstance(name, str) or
++            thread_id in _historical_import_threads or
++            _bootstrap_external is None):
++        return name
++    builtins = sys.modules.get('builtins')
++    if builtins is None or not hasattr(builtins, 'open'):
++        return name
++    main = sys.modules.get('__main__')
++    script = getattr(main, '__file__', None)
++    if not isinstance(script, str) or script.startswith('<'):
++        script = None
++    project = _bootstrap_external._get_historical_project()
++    if not _bootstrap_external._has_historical_project(script, project):
++        return name
++    _historical_import_threads.add(thread_id)
++    try:
++        resolver = _gcd_import('_historical_store')
++        selected_name = resolver.resolve(name, script, project)
++        selection = _split_historical_name(selected_name)
++        if selection is None:
++            return selected_name
++        import_name, distribution, version = selection
++        _historical_selections[import_name] = (distribution, version)
++        return name
++    finally:
++        _historical_import_threads.remove(thread_id)
++
+ def _find_and_load_unlocked(name, import_):
+     path = None
+     parent = name.rpartition('.')[0]
+@@ -1319,8 +1375,19 @@ def _find_and_load_unlocked(name, import_):
+             raise ModuleNotFoundError(msg, name=name) from None
+         parent_spec = parent_module.__spec__
+         child = name.rpartition('.')[2]
+-    spec = _find_spec(name, path)
++    historical_selection = (_historical_selections.get(name)
++                            if not parent else None)
++    if historical_selection is not None:
++        distribution, version = historical_selection
++        spec = _bootstrap_external._find_historical_spec(
++            name, name, distribution, version)
++    else:
++        spec = _find_spec(name, path)
+     if spec is None:
++        if historical_selection is not None:
++            raise ModuleNotFoundError(
++                f'{distribution} version {version} is not available in the '
++                'historical package store', name=name)
+         raise ModuleNotFoundError(f'{_ERR_MSG_PREFIX}{name!r}', name=name)
+     else:
+         if parent_spec:
+@@ -1384,6 +1451,8 @@ def _gcd_import(name, package=None, level=0):
+     _sanity_check(name, package, level)
+     if level > 0:
+         name = _resolve_name(name, package, level)
++    else:
++        name = _resolve_historical_name(name)
+     return _find_and_load(name, _gcd_import)
+ 
+ 
+diff --git a/Lib/importlib/_bootstrap_external.py b/Lib/importlib/_bootstrap_external.py
+index 61dafc0..4de0718 100644
+--- a/Lib/importlib/_bootstrap_external.py
++++ b/Lib/importlib/_bootstrap_external.py
+@@ -917,6 +917,70 @@ def _bless_my_loader(module_globals):
+     return spec_loader
+ 
+ 
++def _get_historical_project():
++    """Return the project root explicitly selected for an embedded host."""
++    if _MS_WINDOWS:
++        project = _os.environ.get('PYTHONHISTORICALPROJECT')
++    else:
++        project = _os.environ.get(b'PYTHONHISTORICALPROJECT')
++        if project is not None:
++            project = project.decode(
++                sys.getfilesystemencoding(), 'surrogateescape')
++    return project or None
++
++
++def _has_historical_project(script, explicit_project):
++    """Check for project metadata without importing the resolver."""
++    if explicit_project:
++        directory, filename = _path_split(explicit_project)
++        if filename not in {'pylock.toml', 'pyproject.toml'}:
++            directory = explicit_project
++        return (_path_isfile(_path_join(directory, 'pylock.toml')) or
++                _path_isfile(_path_join(directory, 'pyproject.toml')))
++    if not script:
++        return False
++    if not _path_isabs(script):
++        script = _path_join(_os.getcwd(), script)
++    directory = _path_split(script)[0]
++    while True:
++        if (_path_isfile(_path_join(directory, 'pylock.toml')) or
++                _path_isfile(_path_join(directory, 'pyproject.toml'))):
++            return True
++        parent = _path_split(directory)[0]
++        if parent == directory:
++            return False
++        directory = parent
++
++
++def _find_historical_spec(fullname, import_name, distribution, version):
++    """Find a pure-Python module or package in the historical store."""
++    if _MS_WINDOWS:
++        home = (_os.environ.get('USERPROFILE') or
++                _os.environ.get('HOME'))
++    else:
++        home = _os.environ.get(b'HOME')
++        if home is not None:
++            home = home.decode(sys.getfilesystemencoding(), 'surrogateescape')
++    if not home:
++        return None
++
++    version_path = _path_join(
++        home, '.python', 'packages', distribution, version)
++    package_path = _path_join(version_path, import_name)
++    init_path = _path_join(package_path, '__init__.py')
++    if _path_isfile(init_path):
++        loader = SourceFileLoader(fullname, init_path)
++        return spec_from_file_location(
++            fullname, init_path, loader=loader,
++            submodule_search_locations=[package_path])
++
++    module_path = _path_join(version_path, import_name + '.py')
++    if _path_isfile(module_path):
++        loader = SourceFileLoader(fullname, module_path)
++        return spec_from_file_location(fullname, module_path, loader=loader)
++    return None
++
++
+ # Loaders #####################################################################
+ 
+ class WindowsRegistryFinder:
+diff --git a/Lib/test/test_historical_package_store.py b/Lib/test/test_historical_package_store.py
+new file mode 100644
+index 0000000..91b5aae
+--- /dev/null
++++ b/Lib/test/test_historical_package_store.py
+@@ -0,0 +1,290 @@
++import os
++import sys
++import unittest
++
++from test.support import os_helper
++from test.support import script_helper
++
++
++class HistoricalPackageStoreTests(unittest.TestCase):
++    def setUp(self):
++        self.home = self.enterContext(os_helper.temp_dir())
++        self.project = self.enterContext(os_helper.temp_dir())
++        self.main = os.path.join(self.project, 'src', 'main.py')
++        os.makedirs(os.path.dirname(self.main))
++        self.write_main('testpkg')
++
++    def write_main(self, import_name):
++        with open(self.main, 'w', encoding='utf-8') as file:
++            file.write(
++                f'import {import_name}\n'
++                f'print({import_name}.VERSION)\n')
++
++    def write_project(self, *dependencies):
++        dependencies = ', '.join(f'"{item}"' for item in dependencies)
++        with open(os.path.join(self.project, 'pyproject.toml'),
++                  'w', encoding='utf-8') as file:
++            file.write(
++                '[project]\n'
++                'name = "version-store-test"\n'
++                'version = "0.1"\n'
++                f'dependencies = [{dependencies}]\n')
++
++    def write_lock(self, version, lock_version='1.0'):
++        with open(os.path.join(self.project, 'pylock.toml'),
++                  'w', encoding='utf-8') as file:
++            file.write(
++                f'lock-version = "{lock_version}"\n'
++                '[[packages]]\n'
++                'name = "testpkg"\n'
++                f'version = "{version}"\n')
++
++    def write_store(self, version, value=None, *, distribution='testpkg',
++                    import_name='testpkg'):
++        package = os.path.join(
++            self.home, '.python', 'packages', distribution, version,
++            import_name)
++        os.makedirs(package)
++        with open(os.path.join(package, '__init__.py'),
++                  'w', encoding='utf-8') as file:
++            file.write(f'VERSION = {(value or version)!r}\n')
++
++    def write_store_module(self, version, value=None, *,
++                           distribution='testpkg', import_name='testpkg'):
++        directory = os.path.join(
++            self.home, '.python', 'packages', distribution, version)
++        os.makedirs(directory)
++        with open(os.path.join(directory, import_name + '.py'),
++                  'w', encoding='utf-8') as file:
++            file.write(f'VERSION = {(value or version)!r}\n')
++
++    def write_ambient(self, value):
++        ambient = self.enterContext(os_helper.temp_dir())
++        package = os.path.join(ambient, 'testpkg')
++        os.makedirs(package)
++        with open(os.path.join(package, '__init__.py'),
++                  'w', encoding='utf-8') as file:
++            file.write(f'VERSION = {value!r}\n')
++        return ambient
++
++    def write_ambient_distribution(self, version, value=None):
++        ambient = self.write_ambient(value or version)
++        metadata = os.path.join(ambient, f'testpkg-{version}.dist-info')
++        os.makedirs(metadata)
++        with open(os.path.join(metadata, 'METADATA'),
++                  'w', encoding='utf-8') as file:
++            file.write(
++                'Metadata-Version: 2.1\n'
++                'Name: testpkg\n'
++                f'Version: {version}\n')
++        return ambient
++
++    def run_main(self, *, ambient=None, expect_success=True):
++        env = {'HOME': self.home, '__isolated': False}
++        if sys.platform == 'win32':
++            env['USERPROFILE'] = self.home
++        if ambient is not None:
++            env['PYTHONPATH'] = ambient
++        run = (script_helper.assert_python_ok if expect_success else
++               script_helper.assert_python_failure)
++        return run(self.main, **env)
++
++    def run_embedded(self, *, metadata_file=False, ambient=None,
++                     expect_success=True,
++                     code='import testpkg; print(testpkg.VERSION)'):
++        project = (os.path.join(self.project, 'pyproject.toml')
++                   if metadata_file else self.project)
++        env = {
++            'HOME': self.home,
++            'PYTHONHISTORICALPROJECT': project,
++            '__isolated': False,
++        }
++        if sys.platform == 'win32':
++            env['USERPROFILE'] = self.home
++        if ambient is not None:
++            env['PYTHONPATH'] = ambient
++        run = (script_helper.assert_python_ok if expect_success else
++               script_helper.assert_python_failure)
++        return run('-c', code, **env)
++
++    def test_changing_exact_project_requirement_changes_version(self):
++        self.write_store('1.0')
++        self.write_store('2.0')
++
++        self.write_project('testpkg==1.0')
++        _, stdout, _ = self.run_main()
++        self.assertEqual(stdout, b'1.0\n')
++
++        self.write_project('testpkg==2.0')
++        _, stdout, _ = self.run_main()
++        self.assertEqual(stdout, b'2.0\n')
++
++    def test_range_selects_highest_compatible_version(self):
++        for version in ('1.0', '1.5', '2.0', '3.0'):
++            self.write_store(version)
++        self.write_project('testpkg>=1.0,<3.0')
++
++        _, stdout, _ = self.run_main()
++
++        self.assertEqual(stdout, b'2.0\n')
++
++    def test_lock_takes_priority_over_project_dependencies(self):
++        self.write_store('1.0')
++        self.write_store('2.0')
++        self.write_project('testpkg==1.0')
++        self.write_lock('2.0')
++
++        _, stdout, _ = self.run_main()
++
++        self.assertEqual(stdout, b'2.0\n')
++
++    def test_incompatible_lock_falls_back_to_project_dependencies(self):
++        self.write_store('1.0')
++        self.write_store('2.0')
++        self.write_project('testpkg==1.0')
++        self.write_lock('2.0', lock_version='2.0')
++
++        _, stdout, _ = self.run_main()
++
++        self.assertEqual(stdout, b'1.0\n')
++
++    def test_metadata_selection_overrides_ambient_package(self):
++        self.write_store('1.0', 'from historical store')
++        self.write_project('testpkg==1.0')
++        ambient = self.write_ambient('from sys.path')
++
++        _, stdout, _ = self.run_main(ambient=ambient)
++
++        self.assertEqual(stdout, b'from historical store\n')
++
++    def test_compatible_ordinary_distribution_precedes_store(self):
++        self.write_store('2.4', 'from historical store')
++        self.write_project('testpkg>=2.0,<3.0')
++        ambient = self.write_ambient_distribution(
++            '2.5', 'from ordinary distribution')
++
++        _, stdout, _ = self.run_main(ambient=ambient)
++
++        self.assertEqual(stdout, b'from ordinary distribution\n')
++
++    def test_incompatible_ordinary_distribution_uses_store(self):
++        self.write_store('2.4', 'from historical store')
++        self.write_project('testpkg>=2.0,<3.0')
++        ambient = self.write_ambient_distribution('3.0')
++
++        _, stdout, _ = self.run_main(ambient=ambient)
++
++        self.assertEqual(stdout, b'from historical store\n')
++
++    def test_no_metadata_preserves_legacy_import(self):
++        ambient = self.write_ambient('legacy import')
++
++        _, stdout, _ = self.run_main(ambient=ambient)
++
++        self.assertEqual(stdout, b'legacy import\n')
++
++    def test_missing_compatible_version_has_specific_error(self):
++        self.write_store('1.0')
++        self.write_project('testpkg>=2.0,<3.0')
++
++        _, _, stderr = self.run_main(expect_success=False)
++
++        self.assertIn(
++            b'testpkg requires >=2.0,<3.0 but no compatible stored version '
++            b'is available', stderr)
++
++    def test_distribution_to_import_name_mapping(self):
++        self.write_main('PIL')
++        self.write_project('Pillow==10.0')
++        self.write_store(
++            '10.0', distribution='Pillow', import_name='PIL')
++
++        _, stdout, _ = self.run_main()
++
++        self.assertEqual(stdout, b'10.0\n')
++
++    def test_single_file_module(self):
++        self.write_main('singlemod')
++        self.write_project('single-dist==1.0')
++        self.write_store_module(
++            '1.0', distribution='single-dist', import_name='singlemod')
++
++        _, stdout, _ = self.run_main()
++
++        self.assertEqual(stdout, b'1.0\n')
++
++    def test_explicit_project_supports_embedded_import(self):
++        self.write_project('testpkg==1.0')
++        self.write_store('1.0', 'from explicit project')
++        ambient = self.write_ambient('from sys.path')
++
++        _, stdout, _ = self.run_embedded(ambient=ambient)
++
++        self.assertEqual(stdout, b'from explicit project\n')
++
++    def test_explicit_metadata_file_supports_embedded_import(self):
++        self.write_project('testpkg==1.0')
++        self.write_store('1.0')
++
++        _, stdout, _ = self.run_embedded(metadata_file=True)
++
++        self.assertEqual(stdout, b'1.0\n')
++
++    def test_selected_package_keeps_normal_module_identity(self):
++        self.write_project('testpkg==1.0')
++        self.write_store('1.0')
++
++        _, stdout, _ = self.run_embedded(code=(
++            'import sys, testpkg; '
++            'print(testpkg.__name__); '
++            'print(sys.modules["testpkg"] is testpkg)'))
++
++        self.assertEqual(stdout, b'testpkg\nTrue\n')
++
++    def test_concurrent_imports_resolve_independently(self):
++        self.write_project('pkgone==1.0', 'pkgtwo==1.0')
++        self.write_store(
++            '1.0', distribution='pkgone', import_name='pkgone')
++        self.write_store(
++            '1.0', distribution='pkgtwo', import_name='pkgtwo')
++
++        _, stdout, _ = self.run_embedded(code='''
++import _historical_store
++import threading
++
++original_resolve = _historical_store.resolve
++barrier = threading.Barrier(2)
++
++def synchronized_resolve(name, *args):
++    if name in {'pkgone', 'pkgtwo'}:
++        barrier.wait(timeout=5)
++    return original_resolve(name, *args)
++
++_historical_store.resolve = synchronized_resolve
++errors = []
++
++def load(name):
++    try:
++        __import__(name)
++    except BaseException as error:
++        errors.append(error)
++
++threads = [threading.Thread(target=load, args=(name,))
++           for name in ('pkgone', 'pkgtwo')]
++for thread in threads:
++    thread.start()
++for thread in threads:
++    thread.join()
++if errors:
++    raise errors[0]
++
++_historical_store.resolve = original_resolve
++import pkgone, pkgtwo
++print(pkgone.VERSION, pkgtwo.VERSION)
++''')
++
++        self.assertEqual(stdout, b'1.0 1.0\n')
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/Python/import.c b/Python/import.c
+index db70909..799670d 100644
+--- a/Python/import.c
++++ b/Python/import.c
+@@ -2844,7 +2844,11 @@ PyImport_ImportModuleLevelObject(PyObject *name, PyObject *globals,
+             _PyErr_SetString(tstate, PyExc_ValueError, "Empty module name");
+             goto error;
+         }
+-        abs_name = Py_NewRef(name);
++        abs_name = PyObject_CallMethod(IMPORTLIB(interp),
++                                       "_resolve_historical_name", "O", name);
++        if (abs_name == NULL) {
++            goto error;
++        }
+     }
+ 
+     mod = import_get_module(tstate, abs_name);
+diff --git a/README.rst b/README.rst
+index 442a03b..85e1516 100644
+--- a/README.rst
++++ b/README.rst
+@@ -14,10 +14,140 @@ This is Python version 3.12.3
+    :target: https://discuss.python.org/
+ 
+ 
+-Copyright © 2001-2024 Python Software Foundation.  All rights reserved.
++Historical package store prototype
++----------------------------------
++
++.. warning::
++
++   This branch is an experimental proof of concept based on CPython 3.12.3.
++   It is not an official Python feature or a production package-management
++   system.
++
++This branch prototypes deterministic, metadata-driven imports from a permanent
++package store. Package releases coexist under paths of the following form::
++
++    ~/.python/packages/<distribution>/<version>/
++
++Projects continue to use normal Python syntax, for example
++``import requests``. The interpreter discovers the project's dependency
++metadata and selects a compatible distribution release; no version syntax is
++added to Python source code.
++
++Motivation
++^^^^^^^^^^
++
++A conventional installation places one selected release of a distribution in
++an environment. Updating that release can invalidate an older application,
++while maintaining a separate environment for every application duplicates
++packages and moves dependency selection outside the program's metadata.
++
++This prototype explores an additive alternative: retain historical releases
++side-by-side, let each project state what it requires, and select a stored
++release without replacing versions needed by other projects. Existing imports
++remain unchanged when no project metadata is present.
++
++Selection model
++^^^^^^^^^^^^^^^
++
++For each absolute import, the prototype:
++
++1. Finds project metadata by walking upward from the main script until it sees
++   ``pylock.toml`` or ``pyproject.toml``. Embedded hosts and ``python -c`` can
++   instead set ``PYTHONHISTORICALPROJECT`` to a project directory or directly
++   to either metadata file.
++2. Uses a compatible ``pylock.toml`` with ``lock-version = "1.0"`` when one is
++   present. Otherwise, it reads ``[project].dependencies`` from
++   ``pyproject.toml``.
++3. Leaves normal import resolution in place when the ordinarily installed
++   distribution satisfies the requirement.
++4. Otherwise selects the exact requested release, or the highest compatible
++   release, from ``~/.python/packages/<distribution>/<version>/``.
++5. Loads either ``<import-name>/__init__.py`` or a single-file
++   ``<import-name>.py`` while preserving the module's ordinary public name.
++
++Distribution names and import names may differ. For example, metadata can name
++``Pillow`` while the application imports ``PIL``. If metadata selects a
++dependency but no compatible stored release is available, import fails with a
++version-specific ``ModuleNotFoundError`` rather than silently using an
++incompatible release.
++
++Minimal example
++^^^^^^^^^^^^^^^
++
++Given this project::
++
++    example/
++        pyproject.toml
++        app.py
++
++with ``pyproject.toml`` containing::
++
++    [project]
++    name = "historical-store-example"
++    version = "0.1"
++    dependencies = ["testpkg==1.0"]
++
++and ``app.py`` containing::
++
++    import testpkg
++    print(testpkg.VERSION)
++
++place the package at::
++
++    ~/.python/packages/testpkg/1.0/testpkg/__init__.py
++
++with the following content::
++
++    VERSION = "1.0"
++
++Running ``app.py`` with this interpreter prints ``1.0``. For an embedded host,
++select the same metadata explicitly::
++
++    PYTHONHISTORICALPROJECT=/path/to/example ./python -c \
++        'import testpkg; print(testpkg.VERSION)'
++
++The interpreter only consumes metadata and imports installed content. Package
++installation and store-management commands belong to the companion
++experimental pip implementation and are not part of this repository.
++
++Implementation and tests
++^^^^^^^^^^^^^^^^^^^^^^^^
++
++The implementation is intentionally isolated in ``Lib/_historical_store.py``
++and small import-bootstrap hooks. Its focused regression suite covers exact and
++ranged requirements, lock-file precedence, ordinary-distribution precedence,
++missing-version errors, differing distribution/import names, single-file
++modules, embedded-project discovery, and unchanged legacy imports.
++
++From a CPython build directory, run the focused tests with::
++
++    ./python -m test test_historical_package_store
++
++A real embedded-application integration is available in the
++`FreeCAD historical-store branch
++<https://github.com/JustTryingToGetSomeWorkDone/FreeCAD/tree/historical-python-store-test>`_.
++
++Prototype boundaries
++^^^^^^^^^^^^^^^^^^^^^
++
++This branch does not download packages, resolve or install dependencies,
++replace pip, remove ``site-packages``, provide lock-file authoring, or support
++simultaneous releases of the same import name in one process. It does not solve
++native-extension ABI or shared-library compatibility. The store root and
++``PYTHONHISTORICALPROJECT`` name are prototype interfaces and may change.
++
++When PyPA's ``packaging`` library is unavailable, the bootstrap-safe fallback
++accepts only final versions made from decimal components and a limited set of
++comparison operators. The prototype has not been performance-optimized; in
++particular, project metadata is currently rediscovered and parsed during
++imports.
+ 
+ See the end of this file for further copyright and license information.
+ 
++This is the end of the prototype explanation.
++----------------------------------------------
++
++
+ .. contents::
+ 
+ General Information

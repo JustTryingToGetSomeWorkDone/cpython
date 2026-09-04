@@ -1,0 +1,103 @@
+commit: 52586f930f62bd80374f0f240a4ecce0c0238174
+Author: Radislav Chugunov <52372310+chgnrdv@users.noreply.github.com>
+Date: Mon, 3 Jun 2024 10:47:36 +0300
+Description: [PATCH] gh-119506: fix `_io.TextIOWrapper.write()` write during flush
+ (#119507)
+
+Co-authored-by: Inada Naoki <songofacandy@gmail.com>
+
+Origin: upstream, https://github.com/python/cpython/commit/52586f930f62bd80374f0f240a4ecce0c0238174
+Bug: https://github.com/python/cpython/issues/119506
+Bug-Ubuntu: https://bugs.launchpad.net/bugs/2144593
+Applied-Upstream: 3.14, https://github.com/python/cpython/commit/52586f930f62bd80374f0f240a4ecce0c0238174
+Last-Update: 2026-03-26
+
+Index: python3.12-3.12.3/Lib/test/test_io.py
+===================================================================
+--- python3.12-3.12.3.orig/Lib/test/test_io.py	2026-03-26 09:48:59.139390494 +1300
++++ python3.12-3.12.3/Lib/test/test_io.py	2026-03-26 09:48:59.127390479 +1300
+@@ -4066,6 +4066,28 @@
+         t.write("x"*chunk_size)
+         self.assertEqual([b"abcdef", b"ghi", b"x"*chunk_size], buf._write_stack)
+ 
++    def test_issue119506(self):
++        chunk_size = 8192
++
++        class MockIO(self.MockRawIO):
++            written = False
++            def write(self, data):
++                if not self.written:
++                    self.written = True
++                    t.write("middle")
++                return super().write(data)
++
++        buf = MockIO()
++        t = self.TextIOWrapper(buf)
++        t.write("abc")
++        t.write("def")
++        # writing data which size >= chunk_size cause flushing buffer before write.
++        t.write("g" * chunk_size)
++        t.flush()
++
++        self.assertEqual([b"abcdef", b"middle", b"g"*chunk_size],
++                         buf._write_stack)
++
+ 
+ class PyTextIOWrapperTest(TextIOWrapperTest):
+     io = pyio
+Index: python3.12-3.12.3/Misc/NEWS.d/next/Library/2024-05-24-14-32-24.gh-issue-119506.-nMNqq.rst
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ python3.12-3.12.3/Misc/NEWS.d/next/Library/2024-05-24-14-32-24.gh-issue-119506.-nMNqq.rst	2026-03-26 09:48:59.128538955 +1300
+@@ -0,0 +1 @@
++Fix :meth:`!io.TextIOWrapper.write` method breaks internal buffer when the method is called again during flushing internal buffer.
+Index: python3.12-3.12.3/Modules/_io/textio.c
+===================================================================
+--- python3.12-3.12.3.orig/Modules/_io/textio.c	2026-03-26 09:48:59.139390494 +1300
++++ python3.12-3.12.3/Modules/_io/textio.c	2026-03-26 09:48:59.129441913 +1300
+@@ -1723,16 +1723,26 @@
+         bytes_len = PyBytes_GET_SIZE(b);
+     }
+ 
+-    if (self->pending_bytes == NULL) {
+-        self->pending_bytes_count = 0;
+-        self->pending_bytes = b;
+-    }
+-    else if (self->pending_bytes_count + bytes_len > self->chunk_size) {
+-        // Prevent to concatenate more than chunk_size data.
+-        if (_textiowrapper_writeflush(self) < 0) {
+-            Py_DECREF(b);
+-            return NULL;
++    // We should avoid concatinating huge data.
++    // Flush the buffer before adding b to the buffer if b is not small.
++    // https://github.com/python/cpython/issues/87426
++    if (bytes_len >= self->chunk_size) {
++        // _textiowrapper_writeflush() calls buffer.write().
++        // self->pending_bytes can be appended during buffer->write()
++        // or other thread.
++        // We need to loop until buffer becomes empty.
++        // https://github.com/python/cpython/issues/118138
++        // https://github.com/python/cpython/issues/119506
++        while (self->pending_bytes != NULL) {
++            if (_textiowrapper_writeflush(self) < 0) {
++                Py_DECREF(b);
++                return NULL;
++            }
+         }
++    }
++
++    if (self->pending_bytes == NULL) {
++        assert(self->pending_bytes_count == 0);
+         self->pending_bytes = b;
+     }
+     else if (!PyList_CheckExact(self->pending_bytes)) {
+@@ -1741,6 +1751,9 @@
+             Py_DECREF(b);
+             return NULL;
+         }
++        // Since Python 3.12, allocating GC object won't trigger GC and release
++        // GIL. See https://github.com/python/cpython/issues/97922
++        assert(!PyList_CheckExact(self->pending_bytes));
+         PyList_SET_ITEM(list, 0, self->pending_bytes);
+         PyList_SET_ITEM(list, 1, b);
+         self->pending_bytes = list;

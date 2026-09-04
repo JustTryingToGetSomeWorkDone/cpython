@@ -1,0 +1,54 @@
+Nodephell package build for Linux Mint 22.3 / Ubuntu 24.04
+==========================================================
+
+This packaging is based on Ubuntu Noble's python3.12 source package
+3.12.3-1ubuntu0.16. Ubuntu's complete Debian patch series remains intact and
+the historical-package-store prototype is applied as its final quilt patch:
+
+    debian/patches/nodephell-historical-store.patch
+
+The local package version is:
+
+    3.12.3-1ubuntu0.16+nodephell1
+
+That version sorts after Ubuntu's 0.16 package but before a future 0.17
+security update. This is intentional: the experiment must not silently block
+new distro security updates.
+
+Build
+-----
+
+Install the architecture-dependent build dependencies from the repository
+root:
+
+    sudo apt-get build-dep --arch-only .
+
+Then build the architecture-dependent unsigned packages needed for the system
+interpreter:
+
+    dpkg-buildpackage --build=any --no-sign -jauto
+
+The resulting .deb files are written to the parent directory. Building does
+not install them or alter the running system Python.
+
+Installation safety
+-------------------
+
+Install the matching packages together with apt, rather than copying files
+into /usr or running upstream ``make install``. At minimum this normally
+includes python3.12-minimal, libpython3.12-minimal, libpython3.12-stdlib, and
+python3.12. Also include any locally installed matching packages such as
+libpython3.12t64, python3.12-dev, libpython3.12-dev, and python3.12-venv.
+
+Keep a bootable Mint live USB and the official Ubuntu packages available for
+recovery. Do not remove the EXTERNALLY-MANAGED marker. The historical store is
+additive and does not require ordinary pip to modify distro-managed paths.
+
+Before installation, record the current package state:
+
+    dpkg-query -W 'python3.12*' 'libpython3.12*'
+
+After installation, verify Python, APT, and the historical importer before
+rebooting. An optional apt hold can keep the experiment in place, but it also
+blocks security upgrades and must be reviewed whenever Ubuntu publishes a new
+python3.12 revision.

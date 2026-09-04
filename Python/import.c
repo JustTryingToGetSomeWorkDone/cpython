@@ -2844,11 +2844,7 @@ PyImport_ImportModuleLevelObject(PyObject *name, PyObject *globals,
             _PyErr_SetString(tstate, PyExc_ValueError, "Empty module name");
             goto error;
         }
-        abs_name = PyObject_CallMethod(IMPORTLIB(interp),
-                                       "_resolve_historical_name", "O", name);
-        if (abs_name == NULL) {
-            goto error;
-        }
+        abs_name = Py_NewRef(name);
     }
 
     mod = import_get_module(tstate, abs_name);

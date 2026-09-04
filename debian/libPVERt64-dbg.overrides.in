@@ -1,0 +1,20 @@
+lib@PVER@t64-dbg binary: package-name-doesnt-match-sonames
+lib@PVER@t64-dbg binary: non-dev-pkg-with-shlib-symlink
+
+# no, it's not unusual
+lib@PVER@t64-dbg binary: unusual-interpreter
+
+# just the gdb debug file
+lib@PVER@t64-dbg binary: python3-script-but-no-python3-dep
+
+# pointless lintian ...
+lib@PVER@t64-dbg binary: hardening-no-fortify-functions
+
+lib@PVER@t64-dbg binary: arch-dependent-file-not-in-arch-specific-directory
+
+# yes, some extensions don't have references to any external lib
+lib@PVER@t64-dbg binary: shared-lib-without-dependency-information
+lib@PVER@t64-dbg binary: library-not-linked-against-libc
+
+# pyexpat.c contains expat error messages that lintian mis-attributes to embedding
+lib@PVER@t64-dbg binary: embedded-library

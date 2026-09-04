@@ -1,0 +1,25 @@
+Description: Ignore errors in the profile task.
+ FIXME: Back story?
+
+Forwarded: no
+
+--- a/Makefile.pre.in
++++ b/Makefile.pre.in
+@@ -659,7 +659,16 @@ profile-run-stamp:
+ 	$(MAKE) profile-gen-stamp
+ 	# Next, run the profile task to generate the profile information.
+ 	@ # FIXME: can't run for a cross build
+-	$(LLVM_PROF_FILE) $(RUNSHARED) ./$(BUILDPYTHON) $(PROFILE_TASK) || true
++	task="$(PROFILE_TASK)"; \
++	case "$$task" in \
++	*-s\ *) \
++	  $(LLVM_PROF_FILE) $(RUNSHARED) ./$(BUILDPYTHON) $$task; \
++	  while [ -f $(abs_builddir)/build/pynexttest ]; do \
++	    $(LLVM_PROF_FILE) $(RUNSHARED) ./$(BUILDPYTHON) $$task; \
++	  done;; \
++	*) \
++	  $(LLVM_PROF_FILE) $(RUNSHARED) ./$(BUILDPYTHON) $$task; \
++	esac || true
+ 	$(LLVM_PROF_MERGER)
+ 	# Remove profile generation binary since we are done with it.
+ 	$(MAKE) clean-retain-profile
