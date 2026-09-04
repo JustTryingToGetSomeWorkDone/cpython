@@ -1,8 +1,10 @@
 """Resolve project dependencies from an experimental historical store.
 
-Project metadata is discovered by walking upward from the main script.  The
-first directory containing ``pylock.toml`` or ``pyproject.toml`` is the project
-root.  A compatible lock file takes priority over ``[project].dependencies``.
+Project metadata is normally discovered by walking upward from the main
+script.  Embedded hosts and ``python -c`` may set ``PYTHONHISTORICALPROJECT``
+to an explicit project directory (or a metadata file inside it).  The first
+directory containing ``pylock.toml`` or ``pyproject.toml`` is the project root.
+A compatible lock file takes priority over ``[project].dependencies``.
 
 This is a deliberately small prototype.  It uses PyPA's ``packaging`` library
 when available.  Stock CPython does not include that library, so a fallback
@@ -40,7 +42,16 @@ def _normalize_name(name):
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _discover_project(script):
+def _discover_project(script, explicit_project=None):
+    if explicit_project:
+        directory = os.path.abspath(os.path.expanduser(explicit_project))
+        if os.path.basename(directory) in {'pylock.toml', 'pyproject.toml'}:
+            directory = os.path.dirname(directory)
+        lock_path = os.path.join(directory, 'pylock.toml')
+        project_path = os.path.join(directory, 'pyproject.toml')
+        if os.path.isfile(lock_path) or os.path.isfile(project_path):
+            return lock_path, project_path
+        return None
     if not script or script.startswith('<'):
         return None
     directory = os.path.dirname(os.path.abspath(script))
@@ -203,8 +214,8 @@ def _project_requirements(path):
     return requirements
 
 
-def _requirements_for_project(script):
-    discovered = _discover_project(script)
+def _requirements_for_project(script, explicit_project=None):
+    discovered = _discover_project(script, explicit_project)
     if discovered is None:
         return None
     lock_path, project_path = discovered
@@ -298,8 +309,10 @@ def _provides_import(distribution_path, import_name):
     with versions:
         return any(
             entry.is_dir() and
-            os.path.isfile(os.path.join(
-                entry.path, import_name, '__init__.py'))
+            (os.path.isfile(os.path.join(
+                entry.path, import_name, '__init__.py')) or
+             os.path.isfile(os.path.join(
+                 entry.path, import_name + '.py')))
             for entry in versions)
 
 
@@ -316,6 +329,15 @@ def _requirement_for_import(import_name, requirements, store):
         if (distribution_path is not None and
                 _provides_import(distribution_path, import_name)):
             return requirement
+    try:
+        from importlib.metadata import packages_distributions
+        providers = packages_distributions().get(import_name, ())
+    except (ImportError, OSError):
+        providers = ()
+    for distribution in providers:
+        requirement = requirements.get(_normalize_name(distribution))
+        if requirement is not None:
+            return requirement
     return None
 
 
@@ -331,8 +353,10 @@ def _select_version(requirement, import_name, store):
     with entries:
         for entry in entries:
             if (entry.is_dir() and
-                    os.path.isfile(os.path.join(
-                        entry.path, import_name, '__init__.py')) and
+                    (os.path.isfile(os.path.join(
+                        entry.path, import_name, '__init__.py')) or
+                     os.path.isfile(os.path.join(
+                         entry.path, import_name + '.py'))) and
                     _matches(entry.name, requirement)):
                 versions.append(entry.name)
     exact = requirement['exact']
@@ -344,6 +368,15 @@ def _select_version(requirement, import_name, store):
         return None
 
 
+def _ordinary_version(requirement):
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        installed = version(requirement['name'])
+    except (ImportError, OSError, PackageNotFoundError):
+        return None
+    return installed if _matches(installed, requirement) else None
+
+
 def _encoded_name(import_name, distribution, version, suffix):
     distribution_hex = distribution.encode('utf-8').hex()
     version_hex = version.encode('utf-8').hex()
@@ -351,17 +384,19 @@ def _encoded_name(import_name, distribution, version, suffix):
     return f'{head}.{suffix}' if suffix else head
 
 
-def resolve(name, script):
+def resolve(name, script=None, explicit_project=None):
     """Return an internal import name selected by project metadata."""
     import_name, separator, suffix = name.partition('.')
     if not import_name.isidentifier():
         return name
-    requirements = _requirements_for_project(script)
+    requirements = _requirements_for_project(script, explicit_project)
     if not requirements:
         return name
     store = _store_root()
     requirement = _requirement_for_import(import_name, requirements, store)
     if requirement is None:
+        return name
+    if _ordinary_version(requirement) is not None:
         return name
     version = _select_version(requirement, import_name, store)
     if version is None:
