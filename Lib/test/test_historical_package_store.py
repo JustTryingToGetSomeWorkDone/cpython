@@ -20,14 +20,15 @@ class HistoricalPackageStoreTests(unittest.TestCase):
                 f'import {import_name}\n'
                 f'print({import_name}.VERSION)\n')
 
-    def write_project(self, dependency):
+    def write_project(self, *dependencies):
+        dependencies = ', '.join(f'"{item}"' for item in dependencies)
         with open(os.path.join(self.project, 'pyproject.toml'),
                   'w', encoding='utf-8') as file:
             file.write(
                 '[project]\n'
                 'name = "version-store-test"\n'
                 'version = "0.1"\n'
-                f'dependencies = ["{dependency}"]\n')
+                f'dependencies = [{dependencies}]\n')
 
     def write_lock(self, version, lock_version='1.0'):
         with open(os.path.join(self.project, 'pylock.toml'),
@@ -239,6 +240,50 @@ class HistoricalPackageStoreTests(unittest.TestCase):
             'print(sys.modules["testpkg"] is testpkg)'))
 
         self.assertEqual(stdout, b'testpkg\nTrue\n')
+
+    def test_concurrent_imports_resolve_independently(self):
+        self.write_project('pkgone==1.0', 'pkgtwo==1.0')
+        self.write_store(
+            '1.0', distribution='pkgone', import_name='pkgone')
+        self.write_store(
+            '1.0', distribution='pkgtwo', import_name='pkgtwo')
+
+        _, stdout, _ = self.run_embedded(code='''
+import _historical_store
+import threading
+
+original_resolve = _historical_store.resolve
+barrier = threading.Barrier(2)
+
+def synchronized_resolve(name, *args):
+    if name in {'pkgone', 'pkgtwo'}:
+        barrier.wait(timeout=5)
+    return original_resolve(name, *args)
+
+_historical_store.resolve = synchronized_resolve
+errors = []
+
+def load(name):
+    try:
+        __import__(name)
+    except BaseException as error:
+        errors.append(error)
+
+threads = [threading.Thread(target=load, args=(name,))
+           for name in ('pkgone', 'pkgtwo')]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
+if errors:
+    raise errors[0]
+
+_historical_store.resolve = original_resolve
+import pkgone, pkgtwo
+print(pkgone.VERSION, pkgtwo.VERSION)
+''')
+
+        self.assertEqual(stdout, b'1.0 1.0\n')
 
 
 if __name__ == '__main__':
