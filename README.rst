@@ -142,6 +142,9 @@ comparison operators. The prototype has not been performance-optimized; in
 particular, project metadata is currently rediscovered and parsed during
 imports.
 
+This is the end of the prototype explanation.
+----------------------------------------------------------------------------
+
 
 Copyright © 2001-2024 Python Software Foundation.  All rights reserved.
 
