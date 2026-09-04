@@ -1139,14 +1139,15 @@ def _split_historical_name(name):
     return import_name, distribution, version
 
 
-_historical_import_active = False
+_historical_import_threads = set()
 _historical_selections = {}
 
 
 def _resolve_historical_name(name):
     """Apply project metadata to an absolute import when appropriate."""
-    global _historical_import_active
-    if (not isinstance(name, str) or _historical_import_active or
+    thread_id = _thread.get_ident()
+    if (not isinstance(name, str) or
+            thread_id in _historical_import_threads or
             _bootstrap_external is None):
         return name
     builtins = sys.modules.get('builtins')
@@ -1159,7 +1160,7 @@ def _resolve_historical_name(name):
     project = _bootstrap_external._get_historical_project()
     if not _bootstrap_external._has_historical_project(script, project):
         return name
-    _historical_import_active = True
+    _historical_import_threads.add(thread_id)
     try:
         resolver = _gcd_import('_historical_store')
         selected_name = resolver.resolve(name, script, project)
@@ -1170,7 +1171,7 @@ def _resolve_historical_name(name):
         _historical_selections[import_name] = (distribution, version)
         return name
     finally:
-        _historical_import_active = False
+        _historical_import_threads.remove(thread_id)
 
 def _find_and_load_unlocked(name, import_):
     path = None
