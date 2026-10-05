@@ -650,20 +650,44 @@ def _has_historical_project(script, explicit_project):
         directory = parent
 
 
-def _find_historical_spec(fullname, import_name, distribution, version):
-    """Find a pure-Python module or package in the historical store."""
+def _historical_store_root():
+    """Return the version-scoped historical package store root."""
     if _MS_WINDOWS:
+        configured = _os.environ.get('PYTHONHISTORICALSTORE_ROOT')
         home = (_os.environ.get('USERPROFILE') or
                 _os.environ.get('HOME'))
     else:
+        configured = _os.environ.get(b'PYTHONHISTORICALSTORE_ROOT')
+        if configured is not None:
+            configured = configured.decode(
+                sys.getfilesystemencoding(), 'surrogateescape')
         home = _os.environ.get(b'HOME')
         if home is not None:
             home = home.decode(sys.getfilesystemencoding(), 'surrogateescape')
+
+    if configured:
+        if configured == '~' and home:
+            configured = home
+        elif configured.startswith(('~/', '~' + path_sep)) and home:
+            configured = _path_join(home, configured[2:])
+        elif not _path_isabs(configured):
+            configured = _path_join(_os.getcwd(), configured)
+        return configured
     if not home:
+        return None
+    version = f'{sys.version_info[0]}{sys.version_info[1]}'
+    return _path_join(home, f'.python{version}', 'packages')
+
+
+
+def _find_historical_spec(fullname, import_name, distribution, version):
+    """Find a pure-Python module or package in the historical store."""
+    store_root = _historical_store_root()
+    if not store_root:
         return None
 
     version_path = _path_join(
-        home, '.python', 'packages', distribution, version)
+        store_root, distribution, version)
     package_path = _path_join(version_path, import_name)
     init_path = _path_join(package_path, '__init__.py')
     if _path_isfile(init_path):

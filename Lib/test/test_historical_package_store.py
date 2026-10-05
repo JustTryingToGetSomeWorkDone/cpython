@@ -11,6 +11,10 @@ class HistoricalPackageStoreTests(unittest.TestCase):
         self.home = self.enterContext(os_helper.temp_dir())
         self.project = self.enterContext(os_helper.temp_dir())
         self.main = os.path.join(self.project, 'src', 'main.py')
+        self.store_root = os.path.join(
+            self.home,
+            f'.python{sys.version_info[0]}{sys.version_info[1]}',
+            'packages')
         os.makedirs(os.path.dirname(self.main))
         self.write_main('testpkg')
 
@@ -42,7 +46,7 @@ class HistoricalPackageStoreTests(unittest.TestCase):
     def write_store(self, version, value=None, *, distribution='testpkg',
                     import_name='testpkg'):
         package = os.path.join(
-            self.home, '.python', 'packages', distribution, version,
+            self.store_root, distribution, version,
             import_name)
         os.makedirs(package)
         with open(os.path.join(package, '__init__.py'),
@@ -52,7 +56,7 @@ class HistoricalPackageStoreTests(unittest.TestCase):
     def write_store_module(self, version, value=None, *,
                            distribution='testpkg', import_name='testpkg'):
         directory = os.path.join(
-            self.home, '.python', 'packages', distribution, version)
+            self.store_root, distribution, version)
         os.makedirs(directory)
         with open(os.path.join(directory, import_name + '.py'),
                   'w', encoding='utf-8') as file:
@@ -106,6 +110,23 @@ class HistoricalPackageStoreTests(unittest.TestCase):
         run = (script_helper.assert_python_ok if expect_success else
                script_helper.assert_python_failure)
         return run('-c', code, **env)
+
+    def test_store_root_uses_python_version_and_override(self):
+        import _historical_store
+
+        with os_helper.EnvironmentVarGuard() as env:
+            env['HOME'] = self.home
+            env.unset('PYTHONHISTORICALSTORE_ROOT')
+            expected = os.path.join(
+                self.home,
+                f'.python{sys.version_info[0]}{sys.version_info[1]}',
+                'packages')
+            self.assertEqual(_historical_store._store_root(), expected)
+
+            override = os.path.join(self.home, 'custom-store')
+            env['PYTHONHISTORICALSTORE_ROOT'] = override
+            self.assertEqual(
+                _historical_store._store_root(), os.path.abspath(override))
 
     def test_changing_exact_project_requirement_changes_version(self):
         self.write_store('1.0')
