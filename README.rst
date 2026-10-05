@@ -24,6 +24,8 @@ This experimental 3.13 branch resolves project dependencies from a compatible
 `pylock.toml` or `pyproject.toml` and selects releases from
 `~/.python/packages/<distribution>/<version>/`. Normal imports remain
 unchanged when no project metadata is present. See
+The store uses a Python-version-scoped root by default; set
+PYTHONHISTORICALSTORE_ROOT to choose an explicit store root.
 `Lib/test/test_historical_package_store.py` for focused regression coverage.
 
 .. contents::
