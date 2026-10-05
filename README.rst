@@ -26,7 +26,10 @@ Historical package store prototype
 This branch prototypes deterministic, metadata-driven imports from a permanent
 package store. Package releases coexist under paths of the following form::
 
-    ~/.python/packages/<distribution>/<version>/
+    ~/.pythonXY/packages/<distribution>/<version>/
+
+XY is the running Python major/minor version. Set
+PYTHONHISTORICALSTORE_ROOT to choose an explicit store root.
 
 Projects continue to use normal Python syntax, for example
 ``import requests``. The interpreter discovers the project's dependency
