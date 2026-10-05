@@ -1299,6 +1299,64 @@ def _sanity_check(name, package, level):
 
 
 _ERR_MSG_PREFIX = 'No module named '
+
+
+def _split_historical_name(name):
+    """Decode the internal name used for a metadata-selected package."""
+    head = name.partition('.')[0]
+    import_name, at, selection = head.partition('@')
+    distribution_hex, colon, version_hex = selection.partition(':')
+    if (not at or not colon or not import_name.isidentifier() or
+            not distribution_hex or not version_hex):
+        return None
+    try:
+        distribution = bytes.fromhex(distribution_hex).decode('utf-8')
+        version = bytes.fromhex(version_hex).decode('utf-8')
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if (not distribution or not version or
+            distribution in {'.', '..'} or version in {'.', '..'} or
+            any(separator in distribution or separator in version
+                for separator in ('/', '\\'))):
+        return None
+    return import_name, distribution, version
+
+
+_historical_import_threads = set()
+_historical_selections = {}
+
+
+def _resolve_historical_name(name):
+    """Apply project metadata to an absolute import when appropriate."""
+    thread_id = _thread.get_ident()
+    if (not isinstance(name, str) or
+            thread_id in _historical_import_threads or
+            _bootstrap_external is None):
+        return name
+    builtins = sys.modules.get('builtins')
+    if builtins is None or not hasattr(builtins, 'open'):
+        return name
+    main = sys.modules.get('__main__')
+    script = getattr(main, '__file__', None)
+    if not isinstance(script, str) or script.startswith('<'):
+        script = None
+    project = _bootstrap_external._get_historical_project()
+    if not _bootstrap_external._has_historical_project(script, project):
+        return name
+    _historical_import_threads.add(thread_id)
+    try:
+        resolver = _gcd_import('_historical_store')
+        selected_name = resolver.resolve(name, script, project)
+        selection = _split_historical_name(selected_name)
+        if selection is None:
+            return selected_name
+        import_name, distribution, version = selection
+        _historical_selections[import_name] = (distribution, version)
+        return name
+    finally:
+        _historical_import_threads.remove(thread_id)
+
+
 _ERR_MSG = _ERR_MSG_PREFIX + '{!r}'
 
 def _find_and_load_unlocked(name, import_):
@@ -1319,8 +1377,19 @@ def _find_and_load_unlocked(name, import_):
             raise ModuleNotFoundError(msg, name=name) from None
         parent_spec = parent_module.__spec__
         child = name.rpartition('.')[2]
-    spec = _find_spec(name, path)
+    historical_selection = (_historical_selections.get(name)
+                            if not parent else None)
+    if historical_selection is not None:
+        distribution, version = historical_selection
+        spec = _bootstrap_external._find_historical_spec(
+            name, name, distribution, version)
+    else:
+        spec = _find_spec(name, path)
     if spec is None:
+        if historical_selection is not None:
+            raise ModuleNotFoundError(
+                f'{distribution} version {version} is not available in the '
+                'historical package store', name=name)
         raise ModuleNotFoundError(f'{_ERR_MSG_PREFIX}{name!r}', name=name)
     else:
         if parent_spec:
@@ -1392,6 +1461,8 @@ def _gcd_import(name, package=None, level=0):
     _sanity_check(name, package, level)
     if level > 0:
         name = _resolve_name(name, package, level)
+    else:
+        name = _resolve_historical_name(name)
     return _find_and_load(name, _gcd_import)
 
 

@@ -18,6 +18,14 @@ Copyright © 2001-2024 Python Software Foundation.  All rights reserved.
 
 See the end of this file for further copyright and license information.
 
+Historical package store prototype
+----------------------------------
+This experimental 3.13 branch resolves project dependencies from a compatible
+`pylock.toml` or `pyproject.toml` and selects releases from
+`~/.python/packages/<distribution>/<version>/`. Normal imports remain
+unchanged when no project metadata is present. See
+`Lib/test/test_historical_package_store.py` for focused regression coverage.
+
 .. contents::
 
 General Information
