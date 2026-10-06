@@ -139,11 +139,14 @@ simultaneous releases of the same import name in one process. It does not solve
 native-extension ABI or shared-library compatibility. The store root and
 ``PYTHONHISTORICALPROJECT`` name are prototype interfaces and may change.
 
-When PyPA's ``packaging`` library is unavailable, the bootstrap-safe fallback
-accepts only final versions made from decimal components and a limited set of
-comparison operators. The prototype has not been performance-optimized; in
-particular, project metadata is currently rediscovered and parsed during
-imports.
+Exact versions in a lock file are resolved during bootstrap without requiring
+PyPA's external ``packaging`` library. The bootstrap-safe fallback for ranges
+in ``pyproject.toml`` accepts final versions made from decimal components and
+a limited set of comparison operators.
+
+Project metadata, import providers, and selected releases are cached for the
+lifetime of the process. Restart Python after changing a project's metadata or
+store.
 
 
 Copyright © 2001-2023 Python Software Foundation.  All rights reserved.

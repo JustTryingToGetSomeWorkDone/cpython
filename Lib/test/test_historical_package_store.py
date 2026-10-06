@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 from test.support import os_helper
 from test.support import script_helper
@@ -36,13 +37,18 @@ class HistoricalPackageStoreTests(unittest.TestCase):
                 f'dependencies = [{dependencies}]\n')
 
     def write_lock(self, version, lock_version='1.0'):
+        self.write_lock_packages(
+            ('testpkg', version), lock_version=lock_version)
+
+    def write_lock_packages(self, *packages, lock_version='1.0'):
         with open(os.path.join(self.project, 'pylock.toml'),
                   'w', encoding='utf-8') as file:
-            file.write(
-                f'lock-version = "{lock_version}"\n'
-                '[[packages]]\n'
-                'name = "testpkg"\n'
-                f'version = "{version}"\n')
+            file.write(f'lock-version = "{lock_version}"\n')
+            for name, version in packages:
+                file.write(
+                    '[[packages]]\n'
+                    f'name = "{name}"\n'
+                    f'version = "{version}"\n')
 
     def write_store(self, version, value=None, *, distribution='testpkg',
                     import_name='testpkg'):
@@ -154,6 +160,48 @@ class HistoricalPackageStoreTests(unittest.TestCase):
         _, stdout, _ = self.run_main()
 
         self.assertEqual(stdout, b'2.0\n')
+
+    def test_post_release_lock_works_without_packaging(self):
+        self.write_main('lockonly')
+        self.write_project('fallback==1.0')
+        self.write_store(
+            '1.0', distribution='lockonly', import_name='lockonly')
+        self.write_lock_packages(
+            ('python-dateutil', '2.9.0.post0'),
+            ('lockonly', '1.0'))
+        blocker = self.enterContext(os_helper.temp_dir())
+        with open(os.path.join(blocker, 'packaging.py'),
+                  'w', encoding='utf-8') as file:
+            file.write('raise ImportError("packaging intentionally blocked")\n')
+
+        _, stdout, _ = self.run_main(ambient=blocker)
+
+        self.assertEqual(stdout, b'1.0\n')
+
+    def test_project_metadata_and_selections_are_cached(self):
+        import _historical_store
+
+        self.write_project('pkgone==1.0', 'pkgtwo==1.0')
+        self.write_store(
+            '1.0', distribution='pkgone', import_name='pkgone')
+        self.write_store(
+            '1.0', distribution='pkgtwo', import_name='pkgtwo')
+        with os_helper.EnvironmentVarGuard() as env:
+            env['HOME'] = self.home
+            with (mock.patch.object(
+                    _historical_store, '_read_toml',
+                    wraps=_historical_store._read_toml) as read_toml,
+                  mock.patch.object(
+                    _historical_store, '_select_version',
+                    wraps=_historical_store._select_version) as select):
+                first = _historical_store.resolve('pkgone', self.main)
+                again = _historical_store.resolve('pkgone', self.main)
+                second = _historical_store.resolve('pkgtwo', self.main)
+
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, second)
+        self.assertEqual(read_toml.call_count, 1)
+        self.assertEqual(select.call_count, 2)
 
     def test_incompatible_lock_falls_back_to_project_dependencies(self):
         self.write_store('1.0')
