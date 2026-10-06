@@ -653,30 +653,17 @@ def _has_historical_project(script, explicit_project):
 def _historical_store_root():
     """Return the version-scoped historical package store root."""
     if _MS_WINDOWS:
-        configured = _os.environ.get('PYTHONHISTORICALSTORE_ROOT')
         home = (_os.environ.get('USERPROFILE') or
                 _os.environ.get('HOME'))
     else:
-        configured = _os.environ.get(b'PYTHONHISTORICALSTORE_ROOT')
-        if configured is not None:
-            configured = configured.decode(
-                sys.getfilesystemencoding(), 'surrogateescape')
         home = _os.environ.get(b'HOME')
         if home is not None:
             home = home.decode(sys.getfilesystemencoding(), 'surrogateescape')
 
-    if configured:
-        if configured == '~' and home:
-            configured = home
-        elif configured.startswith(('~/', '~' + path_sep)) and home:
-            configured = _path_join(home, configured[2:])
-        elif not _path_isabs(configured):
-            configured = _path_join(_os.getcwd(), configured)
-        return configured
     if not home:
         return None
     version = f'{sys.version_info[0]}{sys.version_info[1]}'
-    return _path_join(home, f'.python{version}', 'packages')
+    return _path_join(home, '.python', f'python{version}', 'packages')
 
 
 
