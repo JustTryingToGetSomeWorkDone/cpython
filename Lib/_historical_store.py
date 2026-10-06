@@ -39,6 +39,16 @@ _NAME_PATTERN = re.compile(
 _SPECIFIER_PATTERN = re.compile(
     r"^(~=|==|!=|<=|>=|<|>)\s*([0-9]+(?:\.[0-9]+)*)$")
 _VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
+_LOCKED_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]*$")
+
+
+_PROJECT_REQUIREMENTS_CACHE = {}
+_IMPORT_REQUIREMENT_CACHE = {}
+_STORED_IMPORTS_CACHE = {}
+_ORDINARY_PROVIDERS_CACHE = None
+_RESOLUTION_CACHE = {}
+_CACHE_MISS = object()
+_NORMAL_IMPORT = object()
 
 
 def _normalize_name(name):
@@ -123,6 +133,29 @@ def _make_requirement(name, specifier, raw=None):
     }
 
 
+def _make_locked_requirement(name, version):
+    """Return an exact lock requirement without requiring packaging."""
+    if _PackagingRequirement is not None:
+        return _make_requirement(
+            name, f'=={version}', raw=f'{name}=={version}')
+    name_match = _NAME_PATTERN.fullmatch(name)
+    if (name_match is None or name_match.group(1) != name or
+            name_match.group(2) or
+            _LOCKED_VERSION_PATTERN.fullmatch(version) is None):
+        return None
+    return {
+        'name': name,
+        'specifier': f'=={version}',
+        # The version directory created by pip uses this exact normalized
+        # spelling.  Exact identity also supports PEP 440 spellings such as
+        # 2.9.0.post0 while the resolver is still bootstrapping and cannot
+        # import the separately installed packaging distribution.
+        'parsed': [('===', version)],
+        'exact': version,
+        'raw': f'{name}=={version}',
+    }
+
+
 def _parse_dependency(text):
     if not isinstance(text, str):
         return None
@@ -190,8 +223,7 @@ def _lock_requirements(path):
         version = package.get('version')
         if not isinstance(name, str) or not isinstance(version, str):
             continue
-        requirement = _make_requirement(
-            name, f'=={version}', raw=f'{name}=={version}')
+        requirement = _make_locked_requirement(name, version)
         if requirement is None:
             return None
         normalized = _normalize_name(name)
@@ -217,18 +249,29 @@ def _project_requirements(path):
     return requirements
 
 
-def _requirements_for_project(script, explicit_project=None):
-    discovered = _discover_project(script, explicit_project)
-    if discovered is None:
-        return None
+def _requirements_for_discovered(discovered):
+    cached = _PROJECT_REQUIREMENTS_CACHE.get(discovered, _CACHE_MISS)
+    if cached is not _CACHE_MISS:
+        return cached
     lock_path, project_path = discovered
     if os.path.isfile(lock_path):
         requirements = _lock_requirements(lock_path)
         if requirements is not None:
+            _PROJECT_REQUIREMENTS_CACHE[discovered] = requirements
             return requirements
     if os.path.isfile(project_path):
-        return _project_requirements(project_path)
-    return {}
+        requirements = _project_requirements(project_path)
+    else:
+        requirements = {}
+    _PROJECT_REQUIREMENTS_CACHE[discovered] = requirements
+    return requirements
+
+
+def _requirements_for_project(script, explicit_project=None):
+    discovered = _discover_project(script, explicit_project)
+    if discovered is None:
+        return None
+    return _requirements_for_discovered(discovered)
 
 
 def _release(version):
@@ -245,11 +288,17 @@ def _compare(left, right):
 
 
 def _fallback_matches(version, clauses):
-    try:
-        candidate = _release(version)
-    except ValueError:
-        return False
+    candidate = None
     for operator, required_text in clauses:
+        if operator == '===':
+            if version != required_text:
+                return False
+            continue
+        if candidate is None:
+            try:
+                candidate = _release(version)
+            except ValueError:
+                return False
         required = _release(required_text)
         comparison = _compare(candidate, required)
         if operator == '==' and comparison != 0:
@@ -306,44 +355,78 @@ def _distribution_directory(store, distribution):
     return None
 
 
-def _provides_import(distribution_path, import_name):
+def _stored_imports(distribution_path):
+    cached = _STORED_IMPORTS_CACHE.get(distribution_path)
+    if cached is not None:
+        return cached
+    result = set()
     try:
         versions = os.scandir(distribution_path)
     except OSError:
-        return False
+        return result
     with versions:
-        return any(
-            entry.is_dir() and
-            (os.path.isfile(os.path.join(
-                entry.path, import_name, '__init__.py')) or
-             os.path.isfile(os.path.join(
-                 entry.path, import_name + '.py')))
-            for entry in versions)
+        for version in versions:
+            if not version.is_dir():
+                continue
+            try:
+                entries = os.scandir(version.path)
+            except OSError:
+                continue
+            with entries:
+                for entry in entries:
+                    if (entry.name.isidentifier() and entry.is_dir() and
+                            os.path.isfile(os.path.join(
+                                entry.path, '__init__.py'))):
+                        result.add(entry.name)
+                    elif entry.is_file() and entry.name.endswith('.py'):
+                        import_name = entry.name[:-3]
+                        if import_name.isidentifier():
+                            result.add(import_name)
+    result = frozenset(result)
+    _STORED_IMPORTS_CACHE[distribution_path] = result
+    return result
 
 
-def _requirement_for_import(import_name, requirements, store):
-    normalized_import = import_name.casefold()
+def _ordinary_providers():
+    global _ORDINARY_PROVIDERS_CACHE
+    if _ORDINARY_PROVIDERS_CACHE is None:
+        try:
+            from importlib.metadata import packages_distributions
+            _ORDINARY_PROVIDERS_CACHE = packages_distributions()
+        except (ImportError, OSError):
+            _ORDINARY_PROVIDERS_CACHE = {}
+    return _ORDINARY_PROVIDERS_CACHE
+
+
+def _import_requirement_index(project_key, requirements, store):
+    cache_key = (project_key, store)
+    cached = _IMPORT_REQUIREMENT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    result = {}
     for requirement in requirements.values():
         default_import = _normalize_name(
             requirement['name']).replace('-', '_')
-        if default_import == normalized_import:
-            return requirement
+        result.setdefault(default_import.casefold(), requirement)
+
     for requirement in requirements.values():
         distribution_path = _distribution_directory(
             store, requirement['name'])
-        if (distribution_path is not None and
-                _provides_import(distribution_path, import_name)):
-            return requirement
-    try:
-        from importlib.metadata import packages_distributions
-        providers = packages_distributions().get(import_name, ())
-    except (ImportError, OSError):
-        providers = ()
-    for distribution in providers:
-        requirement = requirements.get(_normalize_name(distribution))
-        if requirement is not None:
-            return requirement
-    return None
+        if distribution_path is None:
+            continue
+        for import_name in _stored_imports(distribution_path):
+            result.setdefault(import_name.casefold(), requirement)
+
+    for import_name, providers in _ordinary_providers().items():
+        for distribution in providers:
+            requirement = requirements.get(_normalize_name(distribution))
+            if requirement is not None:
+                result.setdefault(import_name.casefold(), requirement)
+                break
+
+    _IMPORT_REQUIREMENT_CACHE[cache_key] = result
+    return result
 
 
 def _select_version(requirement, import_name, store):
@@ -394,14 +477,30 @@ def resolve(name, script=None, explicit_project=None):
     import_name, separator, suffix = name.partition('.')
     if not import_name.isidentifier():
         return name
-    requirements = _requirements_for_project(script, explicit_project)
+    discovered = _discover_project(script, explicit_project)
+    if discovered is None:
+        return name
+    requirements = _requirements_for_discovered(discovered)
     if not requirements:
         return name
     store = _store_root()
-    requirement = _requirement_for_import(import_name, requirements, store)
+    cache_key = (discovered, store, import_name.casefold())
+    selection = _RESOLUTION_CACHE.get(cache_key, _CACHE_MISS)
+    if selection is _NORMAL_IMPORT:
+        return name
+    if selection is not _CACHE_MISS:
+        distribution, version = selection
+        return _encoded_name(import_name, distribution, version,
+                             suffix if separator else '')
+
+    requirements_by_import = _import_requirement_index(
+        discovered, requirements, store)
+    requirement = requirements_by_import.get(import_name.casefold())
     if requirement is None:
+        _RESOLUTION_CACHE[cache_key] = _NORMAL_IMPORT
         return name
     if _ordinary_version(requirement) is not None:
+        _RESOLUTION_CACHE[cache_key] = _NORMAL_IMPORT
         return name
     version = _select_version(requirement, import_name, store)
     if version is None:
@@ -411,5 +510,6 @@ def resolve(name, script=None, explicit_project=None):
             "stored version is available")
     distribution_path = _distribution_directory(store, requirement['name'])
     distribution = os.path.basename(distribution_path)
+    _RESOLUTION_CACHE[cache_key] = (distribution, version)
     return _encoded_name(import_name, distribution, version,
                          suffix if separator else '')
