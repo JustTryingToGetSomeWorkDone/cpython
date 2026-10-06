@@ -254,9 +254,11 @@ class HistoricalPackageStoreTests(unittest.TestCase):
 
         _, _, stderr = self.run_main(expect_success=False)
 
+        self.assertIn(b'testpkg requires ', stderr)
+        self.assertIn(b'>=2.0', stderr)
+        self.assertIn(b'<3.0', stderr)
         self.assertIn(
-            b'testpkg requires >=2.0,<3.0 but no compatible stored version '
-            b'is available', stderr)
+            b'but no compatible stored version is available', stderr)
 
     def test_distribution_to_import_name_mapping(self):
         self.write_main('PIL')
