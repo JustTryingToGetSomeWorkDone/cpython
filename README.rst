@@ -24,8 +24,12 @@ This experimental 3.13 branch resolves project dependencies from a compatible
 `pylock.toml` or `pyproject.toml` and selects releases from
 `~/.python/pythonXY/packages/<distribution>/<version>/`, where XY is the
 running Python major/minor version. Normal imports remain unchanged when no
-project metadata is present. See `Lib/test/test_historical_package_store.py`
-for focused regression coverage.
+project metadata is present. Exact versions in a lock file are resolved during
+bootstrap without requiring the external ``packaging`` project. Project
+metadata, import providers, and selected releases are cached for the lifetime
+of the process; restart Python after changing a project's metadata or store.
+See `Lib/test/test_historical_package_store.py` for focused regression
+coverage.
 
 .. contents::
 
