@@ -1,7 +1,7 @@
 """Resolve project dependencies from an experimental historical store.
 
-The default store is version-scoped as ~/.pythonXY/packages, where XY is the
-running Python major/minor version. PYTHONHISTORICALSTORE_ROOT can override it.
+The store is version-scoped as ~/.python/pythonXY/packages, where XY is the
+running Python major/minor version.
 
 Project metadata is normally discovered by walking upward from the main
 script.  Embedded hosts and ``python -c`` may set ``PYTHONHISTORICALPROJECT``
@@ -289,12 +289,9 @@ def _version_key(version):
 
 
 def _store_root():
-    configured = os.environ.get('PYTHONHISTORICALSTORE_ROOT')
-    if configured:
-        return os.path.abspath(os.path.expanduser(configured))
     version = f'{sys.version_info[0]}{sys.version_info[1]}'
-    return os.path.join(os.path.expanduser('~'), f'.python{version}',
-                        'packages')
+    return os.path.join(os.path.expanduser('~'), '.python',
+                        f'python{version}', 'packages')
 
 
 def _distribution_directory(store, distribution):

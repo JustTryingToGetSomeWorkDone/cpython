@@ -26,10 +26,9 @@ Historical package store prototype
 This branch prototypes deterministic, metadata-driven imports from a permanent
 package store. Package releases coexist under paths of the following form::
 
-    ~/.pythonXY/packages/<distribution>/<version>/
+    ~/.python/pythonXY/packages/<distribution>/<version>/
 
-XY is the running Python major/minor version. Set
-PYTHONHISTORICALSTORE_ROOT to choose an explicit store root.
+XY is the running Python major/minor version.
 
 Projects continue to use normal Python syntax, for example
 ``import requests``. The interpreter discovers the project's dependency
@@ -64,7 +63,8 @@ For each absolute import, the prototype:
 3. Leaves normal import resolution in place when the ordinarily installed
    distribution satisfies the requirement.
 4. Otherwise selects the exact requested release, or the highest compatible
-   release, from ``~/.python/packages/<distribution>/<version>/``.
+   release, from
+   ``~/.python/pythonXY/packages/<distribution>/<version>/``.
 5. Loads either ``<import-name>/__init__.py`` or a single-file
    ``<import-name>.py`` while preserving the module's ordinary public name.
 
@@ -97,7 +97,7 @@ and ``app.py`` containing::
 
 place the package at::
 
-    ~/.python/packages/testpkg/1.0/testpkg/__init__.py
+    ~/.python/pythonXY/packages/testpkg/1.0/testpkg/__init__.py
 
 with the following content::
 
